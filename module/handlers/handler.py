@@ -145,6 +145,29 @@ def _record_url(model, rec_id):
     return "%s/web#id=%s&model=%s&view_type=form" % (url, rec_id, model)
 
 
+# ── schema probing ─────────────────────────────────────────────────────────
+
+# {model: set(field names)} — memoised for the life of the process, because
+# the installed module set does not change under a running station.
+_FIELDS = {}
+
+
+def _has_field(model, field):
+    """True when `model` really carries `field` on THIS database.
+
+    Odoo ships fields with modules: `customer_rank` arrives with Accounting,
+    so a field present on one database is simply absent on another. Asking for
+    it blind fails the entire call with `Invalid field 'customer_rank' on
+    'res.partner'`, which is a confusing way to say "the Accounting app is not
+    installed here".
+    """
+    names = _FIELDS.get(model)
+    if names is None:
+        names = set((_rpc(model, "fields_get", [[], ["type"]]) or {}).keys())
+        _FIELDS[model] = names
+    return field in names
+
+
 # ── input coercion ─────────────────────────────────────────────────────────
 
 def _req_str(inputs, field):
@@ -253,7 +276,7 @@ def odoo_find_partner(inputs, stamp):
     domain = [["email", "=ilike", email]] if email else [["name", "ilike", name]]
     partners = _rpc(
         "res.partner", "search_read", [domain],
-        {"fields": ["id", "name", "email", "phone", "vat", "customer_rank"],
+        {"fields": ["id", "name", "email", "phone", "vat"],
          "limit": limit},
     ) or []
 
@@ -276,7 +299,11 @@ def odoo_create_partner(inputs, stamp):
             vals[field] = v
     if isinstance(inputs.get("is_company"), bool):
         vals["is_company"] = inputs["is_company"]
-    vals["customer_rank"] = 1
+    # Marks the partner as a customer so they show up in customer lists. The
+    # field arrives with Accounting, so it is worth setting when present and
+    # must not fail the create when it is not.
+    if _has_field("res.partner", "customer_rank"):
+        vals["customer_rank"] = 1
 
     country_code = _opt_str(inputs, "country_code")
     if country_code:

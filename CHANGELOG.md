@@ -2,6 +2,26 @@
 
 ## Module — `ray9/odoo`
 
+### 1.2.1
+
+Fixed: `find_partner` and `create_partner` failed on any Odoo database without
+the Accounting module installed.
+
+Both touched `customer_rank`, which is not a base field on `res.partner` — it
+arrives with Accounting. On a database without it, `find_partner` died with
+`Invalid field 'customer_rank' on 'res.partner'`. That is the command
+`docs/SETUP.md` names as the setup verification step, so a buyer following the
+documented setup on a fresh Odoo hit a cryptic field error on their first try.
+
+`find_partner` no longer requests the field — it was fetched, passed through,
+and never read. `create_partner` still sets it, because it usefully marks the
+partner as a customer, but now only when a new `_has_field()` probe confirms
+the field exists. The probe uses `fields_get` and is memoised per model for the
+life of the process.
+
+Verified against Odoo Online `saas~19.4+e` with neither Sales nor Invoicing
+installed — the exact database that reproduced the failure.
+
 ### 1.2.0
 
 Twenty-six commands. Added procure-to-pay (`create_purchase_order`,

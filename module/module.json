@@ -1,7 +1,7 @@
 {
   "id": "ray9/odoo",
   "name": "odoo",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "provider": "odoo",
   "credential_spec": {
     "provider": "odoo",
