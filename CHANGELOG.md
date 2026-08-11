@@ -32,6 +32,11 @@ Initial listing. Quote-to-cash: `find_partner`, `create_partner`,
 
 ## Workflow — `ray9/odoo-quote-to-cash-airlock`
 
+### 1.1.1
+
+Metadata only. Added `homepage` and `tests_url` to the payload, which the
+marketplace lifts onto the listing record.
+
 ### 1.1.0
 
 Added a thirteen-node `engine_spec` so the run executes on the DAG engine.
