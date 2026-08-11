@@ -22,6 +22,15 @@ then:
 
 Copy it now — Odoo shows it exactly once.
 
+**Odoo 19 and newer** ask you to scope the key when you create it. Choose
+**RPC**, not MCP — MCP scopes the key to Odoo's own MCP server, which is not
+the External API this module speaks.
+
+Mint the key while logged in to **the same database** you will point the module
+at. An Odoo API key is bound to one user in one database, so a key created in a
+different database authenticates nowhere else — and Odoo reports that as a bare
+rejection with no explanation.
+
 That key inherits **that user's permissions**. Create a dedicated
 integration user with only the access rights you want automated rather
 than using an administrator account. The module can post invoices and
@@ -56,7 +65,9 @@ If it fails:
 
 | Error                                    | Cause                                          |
 | ---------------------------------------- | ---------------------------------------------- |
-| `Odoo rejected the credential for db …`  | Wrong `db`, or the key belongs to another user |
+| `Odoo rejected the credential for db …`  | Wrong `db`, wrong `username`, or a key minted in a different database |
+| `Object sale.order doesn't exist`        | The Sales app is not installed in that database |
+| `Object account.journal doesn't exist`   | The Invoicing app is not installed              |
 | `Odoo credential missing: …`             | A vault field is blank                         |
 | `url must start with https://`           | Missing scheme on `url`                        |
 | `Odoo <model>.<method> failed — …`       | Odoo's own message; usually access rights      |
