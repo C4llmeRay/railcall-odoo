@@ -1,0 +1,9 @@
+# The companion workflow is a SEPARATE marketplace listing
+# (ray9/odoo-quote-to-cash-airlock). Shipping it inside the module bundle
+# bloats the download and makes the signature churn whenever the workflow
+# changes, for no benefit to a buyer of the module.
+workflow/
+
+# Listing copy — belongs to the marketplace record (passed via
+# --description at publish time), not to the code buyers install.
+LISTING.md

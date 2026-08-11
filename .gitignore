@@ -1,0 +1,14 @@
+# Nothing in this repo should ever carry a credential or a key.
+*.key
+*.pem
+*seed*.json
+marketplace_publisher.json
+.railcall/
+.env
+.env.*
+
+__pycache__/
+*.py[cod]
+.DS_Store
+*.bak
+*.log

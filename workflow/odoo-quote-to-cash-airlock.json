@@ -1,0 +1,478 @@
+{
+  "id": "ray9/odoo-quote-to-cash-airlock",
+  "kind": "canvas",
+  "version": "1.1.0",
+  "status": "active",
+  "category": "Finance",
+  "title": "Odoo Quote-to-Cash Airlock",
+  "desc": "Turns one inbound order request into a confirmed Odoo sales order, a posted customer invoice, and an optional reconciled payment — with the customer-exists branch and two amount-drift guards in between.",
+  "description": "Takes a single inbound order request and drives it end to end through Odoo: normalise and validate the payload, look the customer up by email, create the customer only when the lookup misses, draft a quotation, confirm it into a sales order, draft the customer invoice, post it to the ledger, and register a reconciled payment when the order is marked prepaid. Every ledger-touching step runs through the airlock as preview -> approve -> execute, so an operator sees the exact record and total before it fires. The two irreversible money steps carry expected_amount_total, which the odoo module verifies against the live record and refuses when they disagree, closing the gap where a quote is edited between approval and execution. Version 1.1.0 adds a thirteen-node engine_spec so the run executes on the DAG engine: nodes carry parent and branch across four lanes (intake, order, billing, settlement) instead of edges, and every effect declares provider odoo. The six transforms were rewritten to pass the engine transform gate, which allowlists AST nodes and permits neither try nor raise: numeric coercion is now a pure type check plus a regex on strings, and a validation failure emits ok=false with a problems list rather than throwing. Each effect carries a cond reading that flag, so a bad order stops before Odoo instead of raising mid-run - create_customer fires only when the email lookup missed, settle only when the order is prepaid and the posted invoice still has a residual. Both for_each nodes declare for_each_max_size 1, because each list is zero-or-one by construction, so the planner can bound the spend instead of escalating on an unknown count. The thirteen-node canvas is retained for display and now carries the same node code, so the two representations cannot drift. module_dependency pins ray9/odoo at minimum_version 1.2.0 - every effect resolves to a command that module signs, and none of them run without it.",
+  "context": {
+    "order": {
+      "customer": {
+        "name": "Northwind Trading Ltd",
+        "email": "ap@northwind.example",
+        "phone": "+44 20 7946 0111",
+        "country_code": "GB",
+        "vat": "GB123456789",
+        "is_company": true
+      },
+      "lines": [
+        {
+          "name": "Implementation retainer — August",
+          "quantity": 1,
+          "price_unit": 4800
+        },
+        {
+          "name": "Additional integration seat",
+          "quantity": 3,
+          "price_unit": 240
+        }
+      ],
+      "client_order_ref": "PO-2026-0814",
+      "payment_terms": "prepaid"
+    },
+    "max_order_total": 25000,
+    "settle_when_prepaid": true,
+    "payment_journal_id": 0
+  },
+  "capabilities": {
+    "providers": [
+      "odoo"
+    ],
+    "allow_irreversible": true,
+    "max_spend_cents": 2500000
+  },
+  "nodes": [
+    {
+      "id": "normalize",
+      "type": "transform",
+      "input_from": {
+        "order": "{{ctx.order}}",
+        "ceiling": "{{ctx.max_order_total}}"
+      },
+      "code": "def as_num(v):\n    if isinstance(v, bool):\n        return None\n    if isinstance(v, int) or isinstance(v, float):\n        return float(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^-?\\d+(\\.\\d+)?$\", s):\n            return float(s)\n    return None\n\norder = input.get(\"order\") or {}\ncustomer = order.get(\"customer\") or {}\nraw_lines = order.get(\"lines\") or []\nproblems = []\n\nname = str(customer.get(\"name\") or \"\").strip()\nemail = str(customer.get(\"email\") or \"\").strip().lower()\nif not name:\n    problems.append(\"customer.name is empty\")\nif \"@\" not in email:\n    problems.append(\"customer.email is not an address\")\n\nlines = []\ntotal = 0.0\nfor i, ln in enumerate(raw_lines):\n    if not isinstance(ln, dict):\n        problems.append(\"lines[\" + str(i) + \"] is not an object\")\n        continue\n    label = str(ln.get(\"name\") or \"\").strip()\n    if not label and not ln.get(\"product_id\"):\n        problems.append(\"lines[\" + str(i) + \"] has no name and no product_id\")\n        continue\n    qty = as_num(ln.get(\"quantity\", 1))\n    price = as_num(ln.get(\"price_unit\", 0))\n    if qty is None or price is None:\n        problems.append(\"lines[\" + str(i) + \"] has a non-numeric quantity or price\")\n        continue\n    if qty <= 0 or price < 0:\n        problems.append(\"lines[\" + str(i) + \"] has a non-positive quantity or negative price\")\n        continue\n    entry = {\"name\": label, \"quantity\": qty, \"price_unit\": price}\n    if ln.get(\"product_id\"):\n        entry[\"product_id\"] = ln[\"product_id\"]\n    lines.append(entry)\n    total = total + qty * price\n\nif not lines:\n    problems.append(\"no usable order lines\")\n\nceiling = as_num(input.get(\"ceiling\"))\nif ceiling is None:\n    ceiling = 0.0\nif ceiling > 0 and total > ceiling:\n    problems.append(\"order total \" + str(round(total, 2)) + \" exceeds max_order_total \" + str(ceiling))\n\noutput = {\n    \"ok\": not problems,\n    \"problems\": problems,\n    \"email\": email,\n    \"customer\": {\n        \"name\": name,\n        \"email\": email,\n        \"phone\": str(customer.get(\"phone\") or \"\").strip(),\n        \"country_code\": str(customer.get(\"country_code\") or \"\").strip(),\n        \"vat\": str(customer.get(\"vat\") or \"\").strip(),\n        \"is_company\": bool(customer.get(\"is_company\")),\n    },\n    \"lines\": lines,\n    \"subtotal_estimate\": round(total, 2),\n    \"client_order_ref\": str(order.get(\"client_order_ref\") or \"\").strip(),\n    \"prepaid\": str(order.get(\"payment_terms\") or \"\").strip().lower() == \"prepaid\",\n}"
+    },
+    {
+      "id": "lookup_customer",
+      "type": "effect",
+      "action_id": "odoo_find_partner",
+      "retry": {
+        "max": 3,
+        "backoff_s": 2
+      },
+      "args": {
+        "email": "{{nodes.normalize.email}}",
+        "limit": 5
+      }
+    },
+    {
+      "id": "route_customer",
+      "type": "transform",
+      "input_from": {
+        "lookup": "{{nodes.lookup_customer.output}}",
+        "normalized": "{{nodes.normalize.output}}"
+      },
+      "code": "def as_int(v):\n    if isinstance(v, bool):\n        return 0\n    if isinstance(v, int):\n        return v\n    if isinstance(v, float):\n        return int(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^\\d+$\", s):\n            return int(s)\n    return 0\n\nlookup = input.get(\"lookup\") or {}\nnorm = input.get(\"normalized\") or {}\n\nupstream_ok = bool(norm.get(\"ok\"))\nproblems = list(norm.get(\"problems\") or [])\n\nexisting_id = 0\nif lookup.get(\"found\"):\n    existing_id = as_int(lookup.get(\"partner_id\"))\n\ncreate_vals = {}\nto_create = []\nif upstream_ok and not existing_id:\n    vals = dict(norm.get(\"customer\") or {})\n    create_vals = {k: v for k, v in vals.items() if v != \"\" and v is not None}\n    to_create.append(create_vals)\n\noutput = {\n    \"ok\": upstream_ok,\n    \"problems\": problems,\n    \"existing_partner_id\": existing_id,\n    \"needs_create\": bool(upstream_ok and not existing_id),\n    \"create_vals\": create_vals,\n    \"to_create\": to_create,\n    \"branch\": \"reuse_existing\" if existing_id else \"create_new\",\n    \"matched_on\": lookup.get(\"searched_on\", \"email\"),\n    \"candidates_seen\": lookup.get(\"count\", 0),\n}"
+    },
+    {
+      "id": "create_customer",
+      "type": "effect",
+      "action_id": "odoo_create_partner",
+      "for_each": "{{nodes.route_customer.to_create}}",
+      "retry": {
+        "max": 2,
+        "backoff_s": 3
+      },
+      "args": "{{ctx.item}}"
+    },
+    {
+      "id": "resolve_partner",
+      "type": "transform",
+      "input_from": {
+        "routed": "{{nodes.route_customer.output}}",
+        "created": "{{nodes.create_customer.output}}",
+        "normalized": "{{nodes.normalize.output}}"
+      },
+      "code": "def as_int(v):\n    if isinstance(v, bool):\n        return 0\n    if isinstance(v, int):\n        return v\n    if isinstance(v, float):\n        return int(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^\\d+$\", s):\n            return int(s)\n    return 0\n\nrouted = input.get(\"routed\") or {}\ncreated = input.get(\"created\")\nnorm = input.get(\"normalized\") or {}\n\npartner_id = as_int(routed.get(\"existing_partner_id\"))\nsource = \"lookup\"\nif not partner_id:\n    rows = created if isinstance(created, list) else ([created] if created else [])\n    for row in rows:\n        if isinstance(row, dict) and row.get(\"partner_id\"):\n            partner_id = as_int(row.get(\"partner_id\"))\n            source = \"created\"\n            break\n\nproblems = list(routed.get(\"problems\") or [])\nif not partner_id:\n    problems.append(\"no partner_id available - the lookup missed and creation returned nothing\")\n\noutput = {\n    \"ok\": bool(routed.get(\"ok\")) and partner_id > 0,\n    \"problems\": problems,\n    \"partner_id\": partner_id,\n    \"partner_source\": source,\n    \"lines\": norm.get(\"lines\") or [],\n    \"client_order_ref\": norm.get(\"client_order_ref\", \"\"),\n    \"prepaid\": bool(norm.get(\"prepaid\")),\n}"
+    },
+    {
+      "id": "draft_quote",
+      "type": "effect",
+      "action_id": "odoo_create_sale_order",
+      "retry": {
+        "max": 2,
+        "backoff_s": 3
+      },
+      "args": {
+        "partner_id": "{{nodes.resolve_partner.partner_id}}",
+        "lines": "{{nodes.resolve_partner.lines}}",
+        "client_order_ref": "{{nodes.resolve_partner.client_order_ref}}",
+        "note": "Drafted by the RailCall Odoo Quote-to-Cash Airlock. Confirm, invoice and payment each require their own approval."
+      }
+    },
+    {
+      "id": "confirm_order",
+      "type": "effect",
+      "action_id": "odoo_confirm_sale_order",
+      "args": {
+        "order_id": "{{nodes.draft_quote.order_id}}",
+        "expected_amount_total": "{{nodes.draft_quote.amount_total}}"
+      }
+    },
+    {
+      "id": "invoice_basis",
+      "type": "transform",
+      "input_from": {
+        "confirmed": "{{nodes.confirm_order.output}}",
+        "resolved": "{{nodes.resolve_partner.output}}"
+      },
+      "code": "confirmed = input.get(\"confirmed\") or {}\nresolved = input.get(\"resolved\") or {}\n\nso_name = str(confirmed.get(\"order_name\") or \"\").strip()\nstate = str(confirmed.get(\"state\") or \"\")\nproblems = list(resolved.get(\"problems\") or [])\n\nif state not in (\"sale\", \"done\"):\n    problems.append(\"refusing to invoice: sales order \" + (so_name or \"?\") + \" is in state '\" + state + \"', not confirmed\")\n\npartner_id = resolved.get(\"partner_id\")\nif not isinstance(partner_id, int) or isinstance(partner_id, bool) or partner_id <= 0:\n    partner_id = 0\n    problems.append(\"no partner_id to invoice\")\n\nbilled = []\nfor ln in (resolved.get(\"lines\") or []):\n    entry = dict(ln)\n    label = str(entry.get(\"name\") or \"\").strip()\n    entry[\"name\"] = (label + \" [\" + so_name + \"]\") if so_name else label\n    billed.append(entry)\n\nif not billed:\n    problems.append(\"confirmed order \" + (so_name or \"?\") + \" produced no billable lines\")\n\noutput = {\n    \"ok\": not problems,\n    \"problems\": problems,\n    \"partner_id\": partner_id,\n    \"lines\": billed,\n    \"source_order\": so_name,\n    \"confirmed_total\": confirmed.get(\"amount_total\", 0),\n    \"line_count\": len(billed),\n}"
+    },
+    {
+      "id": "draft_invoice",
+      "type": "effect",
+      "action_id": "odoo_create_invoice",
+      "retry": {
+        "max": 2,
+        "backoff_s": 3
+      },
+      "args": {
+        "partner_id": "{{nodes.invoice_basis.partner_id}}",
+        "lines": "{{nodes.invoice_basis.lines}}",
+        "payment_reference": "{{nodes.invoice_basis.source_order}}",
+        "narration": "Invoice raised against confirmed sales order {{nodes.invoice_basis.source_order}} by the RailCall Quote-to-Cash Airlock."
+      }
+    },
+    {
+      "id": "post_invoice",
+      "type": "effect",
+      "action_id": "odoo_post_invoice",
+      "args": {
+        "invoice_id": "{{nodes.draft_invoice.invoice_id}}",
+        "expected_amount_total": "{{nodes.draft_invoice.amount_total}}"
+      }
+    },
+    {
+      "id": "settle_decision",
+      "type": "transform",
+      "input_from": {
+        "posted": "{{nodes.post_invoice.output}}",
+        "resolved": "{{nodes.resolve_partner.output}}",
+        "settle_enabled": "{{ctx.settle_when_prepaid}}",
+        "journal_id": "{{ctx.payment_journal_id}}"
+      },
+      "code": "def as_num(v):\n    if isinstance(v, bool):\n        return None\n    if isinstance(v, int) or isinstance(v, float):\n        return float(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^-?\\d+(\\.\\d+)?$\", s):\n            return float(s)\n    return None\n\nposted = input.get(\"posted\") or {}\nresolved = input.get(\"resolved\") or {}\n\nenabled = str(input.get(\"settle_enabled\")).strip().lower() in (\"1\", \"true\", \"yes\")\nprepaid = bool(resolved.get(\"prepaid\"))\n\nresidual = as_num(posted.get(\"amount_residual\"))\nif residual is None:\n    residual = 0.0\n\ninvoice_id = posted.get(\"invoice_id\") or 0\n\nto_settle = []\nsettle_vals = {}\nif not enabled:\n    reason = \"settle_when_prepaid is off for this station\"\nelif not prepaid:\n    reason = \"order payment_terms is not prepaid - leaving the invoice open\"\nelif residual <= 0:\n    reason = \"invoice has nothing left to pay\"\nelif not invoice_id:\n    reason = \"no invoice_id came back from the post step\"\nelse:\n    entry = {\n        \"invoice_id\": invoice_id,\n        \"amount\": residual,\n        \"memo\": \"Prepayment for \" + str(posted.get(\"invoice_name\") or invoice_id),\n    }\n    jid = as_num(input.get(\"journal_id\"))\n    if jid is not None and jid > 0:\n        entry[\"journal_id\"] = int(jid)\n    to_settle.append(entry)\n    settle_vals = entry\n    reason = \"prepaid order - settling the full residual\"\n\noutput = {\n    \"to_settle\": to_settle,\n    \"settle_vals\": settle_vals,\n    \"will_settle\": bool(to_settle),\n    \"reason\": reason,\n    \"residual\": residual,\n}"
+    },
+    {
+      "id": "settle",
+      "type": "effect",
+      "action_id": "odoo_register_payment",
+      "for_each": "{{nodes.settle_decision.to_settle}}",
+      "args": "{{ctx.item}}"
+    },
+    {
+      "id": "close_out",
+      "type": "transform",
+      "input_from": {
+        "normalized": "{{nodes.normalize.output}}",
+        "routed": "{{nodes.route_customer.output}}",
+        "order": "{{nodes.confirm_order.output}}",
+        "invoice": "{{nodes.post_invoice.output}}",
+        "decision": "{{nodes.settle_decision.output}}",
+        "payment": "{{nodes.settle.output}}",
+        "basis": "{{nodes.invoice_basis.output}}"
+      },
+      "code": "norm = input.get(\"normalized\") or {}\nrouted = input.get(\"routed\") or {}\norder = input.get(\"order\") or {}\ninvoice = input.get(\"invoice\") or {}\ndecision = input.get(\"decision\") or {}\npayment = input.get(\"payment\")\n\nrows = payment if isinstance(payment, list) else ([payment] if payment else [])\npaid_row = rows[0] if rows and isinstance(rows[0], dict) else {}\n\nsettled = bool(paid_row)\nresidual = paid_row.get(\"amount_residual\", invoice.get(\"amount_residual\", 0))\n\nproblems = []\nfor src in (norm, routed, input.get(\"basis\") or {}):\n    for p in (src.get(\"problems\") or []):\n        if p not in problems:\n            problems.append(p)\n\noutput = {\n    \"customer_branch\": routed.get(\"branch\", \"\"),\n    \"partner_id\": routed.get(\"existing_partner_id\") or 0,\n    \"sale_order\": order.get(\"order_name\", \"\"),\n    \"sale_order_state\": order.get(\"state\", \"\"),\n    \"invoice\": invoice.get(\"invoice_name\", \"\"),\n    \"invoice_state\": invoice.get(\"state\", \"\"),\n    \"invoice_total\": invoice.get(\"amount_total\", 0),\n    \"amount_residual\": residual,\n    \"settled\": settled,\n    \"settlement_note\": decision.get(\"reason\", \"\"),\n    \"halted\": bool(problems),\n    \"validation_problems\": problems,\n    \"record_url\": invoice.get(\"record_url\", \"\"),\n}"
+    }
+  ],
+  "edges": [
+    {
+      "from": "normalize",
+      "to": "lookup_customer"
+    },
+    {
+      "from": "lookup_customer",
+      "to": "route_customer"
+    },
+    {
+      "from": "route_customer",
+      "to": "create_customer"
+    },
+    {
+      "from": "route_customer",
+      "to": "resolve_partner"
+    },
+    {
+      "from": "create_customer",
+      "to": "resolve_partner"
+    },
+    {
+      "from": "resolve_partner",
+      "to": "draft_quote"
+    },
+    {
+      "from": "draft_quote",
+      "to": "confirm_order"
+    },
+    {
+      "from": "confirm_order",
+      "to": "invoice_basis"
+    },
+    {
+      "from": "invoice_basis",
+      "to": "draft_invoice"
+    },
+    {
+      "from": "draft_invoice",
+      "to": "post_invoice"
+    },
+    {
+      "from": "post_invoice",
+      "to": "settle_decision"
+    },
+    {
+      "from": "settle_decision",
+      "to": "settle"
+    },
+    {
+      "from": "settle",
+      "to": "close_out"
+    },
+    {
+      "from": "normalize",
+      "to": "close_out"
+    }
+  ],
+  "engine_spec": {
+    "id": "odoo-quote-to-cash-airlock",
+    "title": "Odoo Quote-to-Cash Airlock",
+    "nodes": [
+      {
+        "id": "normalize",
+        "type": "transform",
+        "branch": "intake",
+        "input_from": {
+          "order": "{{ctx.order}}",
+          "ceiling": "{{ctx.max_order_total}}"
+        },
+        "code": "def as_num(v):\n    if isinstance(v, bool):\n        return None\n    if isinstance(v, int) or isinstance(v, float):\n        return float(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^-?\\d+(\\.\\d+)?$\", s):\n            return float(s)\n    return None\n\norder = input.get(\"order\") or {}\ncustomer = order.get(\"customer\") or {}\nraw_lines = order.get(\"lines\") or []\nproblems = []\n\nname = str(customer.get(\"name\") or \"\").strip()\nemail = str(customer.get(\"email\") or \"\").strip().lower()\nif not name:\n    problems.append(\"customer.name is empty\")\nif \"@\" not in email:\n    problems.append(\"customer.email is not an address\")\n\nlines = []\ntotal = 0.0\nfor i, ln in enumerate(raw_lines):\n    if not isinstance(ln, dict):\n        problems.append(\"lines[\" + str(i) + \"] is not an object\")\n        continue\n    label = str(ln.get(\"name\") or \"\").strip()\n    if not label and not ln.get(\"product_id\"):\n        problems.append(\"lines[\" + str(i) + \"] has no name and no product_id\")\n        continue\n    qty = as_num(ln.get(\"quantity\", 1))\n    price = as_num(ln.get(\"price_unit\", 0))\n    if qty is None or price is None:\n        problems.append(\"lines[\" + str(i) + \"] has a non-numeric quantity or price\")\n        continue\n    if qty <= 0 or price < 0:\n        problems.append(\"lines[\" + str(i) + \"] has a non-positive quantity or negative price\")\n        continue\n    entry = {\"name\": label, \"quantity\": qty, \"price_unit\": price}\n    if ln.get(\"product_id\"):\n        entry[\"product_id\"] = ln[\"product_id\"]\n    lines.append(entry)\n    total = total + qty * price\n\nif not lines:\n    problems.append(\"no usable order lines\")\n\nceiling = as_num(input.get(\"ceiling\"))\nif ceiling is None:\n    ceiling = 0.0\nif ceiling > 0 and total > ceiling:\n    problems.append(\"order total \" + str(round(total, 2)) + \" exceeds max_order_total \" + str(ceiling))\n\noutput = {\n    \"ok\": not problems,\n    \"problems\": problems,\n    \"email\": email,\n    \"customer\": {\n        \"name\": name,\n        \"email\": email,\n        \"phone\": str(customer.get(\"phone\") or \"\").strip(),\n        \"country_code\": str(customer.get(\"country_code\") or \"\").strip(),\n        \"vat\": str(customer.get(\"vat\") or \"\").strip(),\n        \"is_company\": bool(customer.get(\"is_company\")),\n    },\n    \"lines\": lines,\n    \"subtotal_estimate\": round(total, 2),\n    \"client_order_ref\": str(order.get(\"client_order_ref\") or \"\").strip(),\n    \"prepaid\": str(order.get(\"payment_terms\") or \"\").strip().lower() == \"prepaid\",\n}"
+      },
+      {
+        "id": "lookup_customer",
+        "type": "effect",
+        "branch": "intake",
+        "parent": "normalize",
+        "cond": "{{nodes.normalize.ok}}",
+        "provider": "odoo",
+        "action_id": "odoo_find_partner",
+        "retry": {
+          "max": 3,
+          "backoff_s": 2
+        },
+        "args": {
+          "email": "{{nodes.normalize.email}}",
+          "limit": 5
+        }
+      },
+      {
+        "id": "route_customer",
+        "type": "transform",
+        "branch": "intake",
+        "parent": "lookup_customer",
+        "input_from": {
+          "lookup": "{{nodes.lookup_customer.output}}",
+          "normalized": "{{nodes.normalize.output}}"
+        },
+        "code": "def as_int(v):\n    if isinstance(v, bool):\n        return 0\n    if isinstance(v, int):\n        return v\n    if isinstance(v, float):\n        return int(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^\\d+$\", s):\n            return int(s)\n    return 0\n\nlookup = input.get(\"lookup\") or {}\nnorm = input.get(\"normalized\") or {}\n\nupstream_ok = bool(norm.get(\"ok\"))\nproblems = list(norm.get(\"problems\") or [])\n\nexisting_id = 0\nif lookup.get(\"found\"):\n    existing_id = as_int(lookup.get(\"partner_id\"))\n\ncreate_vals = {}\nto_create = []\nif upstream_ok and not existing_id:\n    vals = dict(norm.get(\"customer\") or {})\n    create_vals = {k: v for k, v in vals.items() if v != \"\" and v is not None}\n    to_create.append(create_vals)\n\noutput = {\n    \"ok\": upstream_ok,\n    \"problems\": problems,\n    \"existing_partner_id\": existing_id,\n    \"needs_create\": bool(upstream_ok and not existing_id),\n    \"create_vals\": create_vals,\n    \"to_create\": to_create,\n    \"branch\": \"reuse_existing\" if existing_id else \"create_new\",\n    \"matched_on\": lookup.get(\"searched_on\", \"email\"),\n    \"candidates_seen\": lookup.get(\"count\", 0),\n}"
+      },
+      {
+        "id": "create_customer",
+        "type": "effect",
+        "branch": "intake",
+        "parent": "route_customer",
+        "cond": "{{nodes.route_customer.needs_create}}",
+        "provider": "odoo",
+        "action_id": "odoo_create_partner",
+        "retry": {
+          "max": 2,
+          "backoff_s": 3
+        },
+        "for_each": "{{nodes.route_customer.to_create}}",
+        "for_each_max_size": 1,
+        "args": "{{ctx.item}}"
+      },
+      {
+        "id": "resolve_partner",
+        "type": "transform",
+        "branch": "intake",
+        "parent": "create_customer",
+        "input_from": {
+          "routed": "{{nodes.route_customer.output}}",
+          "created": "{{nodes.create_customer.output}}",
+          "normalized": "{{nodes.normalize.output}}"
+        },
+        "code": "def as_int(v):\n    if isinstance(v, bool):\n        return 0\n    if isinstance(v, int):\n        return v\n    if isinstance(v, float):\n        return int(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^\\d+$\", s):\n            return int(s)\n    return 0\n\nrouted = input.get(\"routed\") or {}\ncreated = input.get(\"created\")\nnorm = input.get(\"normalized\") or {}\n\npartner_id = as_int(routed.get(\"existing_partner_id\"))\nsource = \"lookup\"\nif not partner_id:\n    rows = created if isinstance(created, list) else ([created] if created else [])\n    for row in rows:\n        if isinstance(row, dict) and row.get(\"partner_id\"):\n            partner_id = as_int(row.get(\"partner_id\"))\n            source = \"created\"\n            break\n\nproblems = list(routed.get(\"problems\") or [])\nif not partner_id:\n    problems.append(\"no partner_id available - the lookup missed and creation returned nothing\")\n\noutput = {\n    \"ok\": bool(routed.get(\"ok\")) and partner_id > 0,\n    \"problems\": problems,\n    \"partner_id\": partner_id,\n    \"partner_source\": source,\n    \"lines\": norm.get(\"lines\") or [],\n    \"client_order_ref\": norm.get(\"client_order_ref\", \"\"),\n    \"prepaid\": bool(norm.get(\"prepaid\")),\n}"
+      },
+      {
+        "id": "draft_quote",
+        "type": "effect",
+        "branch": "order",
+        "parent": "resolve_partner",
+        "cond": "{{nodes.resolve_partner.ok}}",
+        "provider": "odoo",
+        "action_id": "odoo_create_sale_order",
+        "retry": {
+          "max": 2,
+          "backoff_s": 3
+        },
+        "args": {
+          "partner_id": "{{nodes.resolve_partner.partner_id}}",
+          "lines": "{{nodes.resolve_partner.lines}}",
+          "client_order_ref": "{{nodes.resolve_partner.client_order_ref}}",
+          "note": "Drafted by the RailCall Odoo Quote-to-Cash Airlock. Confirm, invoice and payment each require their own approval."
+        }
+      },
+      {
+        "id": "confirm_order",
+        "type": "effect",
+        "branch": "order",
+        "parent": "draft_quote",
+        "cond": "{{nodes.resolve_partner.ok}}",
+        "provider": "odoo",
+        "action_id": "odoo_confirm_sale_order",
+        "args": {
+          "order_id": "{{nodes.draft_quote.order_id}}",
+          "expected_amount_total": "{{nodes.draft_quote.amount_total}}"
+        }
+      },
+      {
+        "id": "invoice_basis",
+        "type": "transform",
+        "branch": "billing",
+        "parent": "confirm_order",
+        "input_from": {
+          "confirmed": "{{nodes.confirm_order.output}}",
+          "resolved": "{{nodes.resolve_partner.output}}"
+        },
+        "code": "confirmed = input.get(\"confirmed\") or {}\nresolved = input.get(\"resolved\") or {}\n\nso_name = str(confirmed.get(\"order_name\") or \"\").strip()\nstate = str(confirmed.get(\"state\") or \"\")\nproblems = list(resolved.get(\"problems\") or [])\n\nif state not in (\"sale\", \"done\"):\n    problems.append(\"refusing to invoice: sales order \" + (so_name or \"?\") + \" is in state '\" + state + \"', not confirmed\")\n\npartner_id = resolved.get(\"partner_id\")\nif not isinstance(partner_id, int) or isinstance(partner_id, bool) or partner_id <= 0:\n    partner_id = 0\n    problems.append(\"no partner_id to invoice\")\n\nbilled = []\nfor ln in (resolved.get(\"lines\") or []):\n    entry = dict(ln)\n    label = str(entry.get(\"name\") or \"\").strip()\n    entry[\"name\"] = (label + \" [\" + so_name + \"]\") if so_name else label\n    billed.append(entry)\n\nif not billed:\n    problems.append(\"confirmed order \" + (so_name or \"?\") + \" produced no billable lines\")\n\noutput = {\n    \"ok\": not problems,\n    \"problems\": problems,\n    \"partner_id\": partner_id,\n    \"lines\": billed,\n    \"source_order\": so_name,\n    \"confirmed_total\": confirmed.get(\"amount_total\", 0),\n    \"line_count\": len(billed),\n}"
+      },
+      {
+        "id": "draft_invoice",
+        "type": "effect",
+        "branch": "billing",
+        "parent": "invoice_basis",
+        "cond": "{{nodes.invoice_basis.ok}}",
+        "provider": "odoo",
+        "action_id": "odoo_create_invoice",
+        "retry": {
+          "max": 2,
+          "backoff_s": 3
+        },
+        "args": {
+          "partner_id": "{{nodes.invoice_basis.partner_id}}",
+          "lines": "{{nodes.invoice_basis.lines}}",
+          "payment_reference": "{{nodes.invoice_basis.source_order}}",
+          "narration": "Invoice raised against confirmed sales order {{nodes.invoice_basis.source_order}} by the RailCall Quote-to-Cash Airlock."
+        }
+      },
+      {
+        "id": "post_invoice",
+        "type": "effect",
+        "branch": "billing",
+        "parent": "draft_invoice",
+        "cond": "{{nodes.invoice_basis.ok}}",
+        "provider": "odoo",
+        "action_id": "odoo_post_invoice",
+        "args": {
+          "invoice_id": "{{nodes.draft_invoice.invoice_id}}",
+          "expected_amount_total": "{{nodes.draft_invoice.amount_total}}"
+        }
+      },
+      {
+        "id": "settle_decision",
+        "type": "transform",
+        "branch": "settlement",
+        "parent": "post_invoice",
+        "input_from": {
+          "posted": "{{nodes.post_invoice.output}}",
+          "resolved": "{{nodes.resolve_partner.output}}",
+          "settle_enabled": "{{ctx.settle_when_prepaid}}",
+          "journal_id": "{{ctx.payment_journal_id}}"
+        },
+        "code": "def as_num(v):\n    if isinstance(v, bool):\n        return None\n    if isinstance(v, int) or isinstance(v, float):\n        return float(v)\n    if isinstance(v, str):\n        s = v.strip()\n        if re.match(r\"^-?\\d+(\\.\\d+)?$\", s):\n            return float(s)\n    return None\n\nposted = input.get(\"posted\") or {}\nresolved = input.get(\"resolved\") or {}\n\nenabled = str(input.get(\"settle_enabled\")).strip().lower() in (\"1\", \"true\", \"yes\")\nprepaid = bool(resolved.get(\"prepaid\"))\n\nresidual = as_num(posted.get(\"amount_residual\"))\nif residual is None:\n    residual = 0.0\n\ninvoice_id = posted.get(\"invoice_id\") or 0\n\nto_settle = []\nsettle_vals = {}\nif not enabled:\n    reason = \"settle_when_prepaid is off for this station\"\nelif not prepaid:\n    reason = \"order payment_terms is not prepaid - leaving the invoice open\"\nelif residual <= 0:\n    reason = \"invoice has nothing left to pay\"\nelif not invoice_id:\n    reason = \"no invoice_id came back from the post step\"\nelse:\n    entry = {\n        \"invoice_id\": invoice_id,\n        \"amount\": residual,\n        \"memo\": \"Prepayment for \" + str(posted.get(\"invoice_name\") or invoice_id),\n    }\n    jid = as_num(input.get(\"journal_id\"))\n    if jid is not None and jid > 0:\n        entry[\"journal_id\"] = int(jid)\n    to_settle.append(entry)\n    settle_vals = entry\n    reason = \"prepaid order - settling the full residual\"\n\noutput = {\n    \"to_settle\": to_settle,\n    \"settle_vals\": settle_vals,\n    \"will_settle\": bool(to_settle),\n    \"reason\": reason,\n    \"residual\": residual,\n}"
+      },
+      {
+        "id": "settle",
+        "type": "effect",
+        "branch": "settlement",
+        "parent": "settle_decision",
+        "cond": "{{nodes.settle_decision.will_settle}}",
+        "provider": "odoo",
+        "action_id": "odoo_register_payment",
+        "for_each": "{{nodes.settle_decision.to_settle}}",
+        "for_each_max_size": 1,
+        "args": "{{ctx.item}}"
+      },
+      {
+        "id": "close_out",
+        "type": "transform",
+        "branch": "settlement",
+        "parent": "settle",
+        "input_from": {
+          "normalized": "{{nodes.normalize.output}}",
+          "routed": "{{nodes.route_customer.output}}",
+          "order": "{{nodes.confirm_order.output}}",
+          "invoice": "{{nodes.post_invoice.output}}",
+          "decision": "{{nodes.settle_decision.output}}",
+          "payment": "{{nodes.settle.output}}",
+          "basis": "{{nodes.invoice_basis.output}}"
+        },
+        "code": "norm = input.get(\"normalized\") or {}\nrouted = input.get(\"routed\") or {}\norder = input.get(\"order\") or {}\ninvoice = input.get(\"invoice\") or {}\ndecision = input.get(\"decision\") or {}\npayment = input.get(\"payment\")\n\nrows = payment if isinstance(payment, list) else ([payment] if payment else [])\npaid_row = rows[0] if rows and isinstance(rows[0], dict) else {}\n\nsettled = bool(paid_row)\nresidual = paid_row.get(\"amount_residual\", invoice.get(\"amount_residual\", 0))\n\nproblems = []\nfor src in (norm, routed, input.get(\"basis\") or {}):\n    for p in (src.get(\"problems\") or []):\n        if p not in problems:\n            problems.append(p)\n\noutput = {\n    \"customer_branch\": routed.get(\"branch\", \"\"),\n    \"partner_id\": routed.get(\"existing_partner_id\") or 0,\n    \"sale_order\": order.get(\"order_name\", \"\"),\n    \"sale_order_state\": order.get(\"state\", \"\"),\n    \"invoice\": invoice.get(\"invoice_name\", \"\"),\n    \"invoice_state\": invoice.get(\"state\", \"\"),\n    \"invoice_total\": invoice.get(\"amount_total\", 0),\n    \"amount_residual\": residual,\n    \"settled\": settled,\n    \"settlement_note\": decision.get(\"reason\", \"\"),\n    \"halted\": bool(problems),\n    \"validation_problems\": problems,\n    \"record_url\": invoice.get(\"record_url\", \"\"),\n}"
+      }
+    ],
+    "context": {
+      "order": {
+        "customer": {
+          "name": "Northwind Trading Ltd",
+          "email": "ap@northwind.example",
+          "phone": "+44 20 7946 0111",
+          "country_code": "GB",
+          "vat": "GB123456789",
+          "is_company": true
+        },
+        "lines": [
+          {
+            "name": "Implementation retainer — August",
+            "quantity": 1,
+            "price_unit": 4800
+          },
+          {
+            "name": "Additional integration seat",
+            "quantity": 3,
+            "price_unit": 240
+          }
+        ],
+        "client_order_ref": "PO-2026-0814",
+        "payment_terms": "prepaid"
+      },
+      "max_order_total": 25000,
+      "settle_when_prepaid": true,
+      "payment_journal_id": 0
+    },
+    "capabilities": {
+      "providers": [
+        "odoo"
+      ],
+      "allow_irreversible": true,
+      "max_spend_cents": 2500000
+    }
+  },
+  "module_dependency": {
+    "id": "ray9/odoo",
+    "minimum_version": "1.2.0"
+  },
+  "updated": "2026-08-11T00:00:00Z",
+  "homepage": "https://github.com/C4llmeRay/railcall-odoo",
+  "tests_url": "https://github.com/C4llmeRay/railcall-odoo/blob/main/TESTING.md"
+}

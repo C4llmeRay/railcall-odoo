@@ -1,0 +1,990 @@
+{
+  "id": "ray9/odoo",
+  "name": "odoo",
+  "version": "1.2.0",
+  "provider": "odoo",
+  "credential_spec": {
+    "provider": "odoo",
+    "category": "erp",
+    "name": "Odoo ERP",
+    "required": [
+      "url",
+      "db",
+      "username",
+      "api_key"
+    ],
+    "optional": [],
+    "shape": "dict",
+    "risk": "high",
+    "read_write": "write"
+  },
+  "description": "Governed Odoo ERP operations over the External API (JSON-RPC 2.0), spanning quote-to-cash, procure-to-pay, CRM, inventory, projects and document handling. Twenty-six commands: find, create, update and archive customers; find and create products and update their sales price; run a scoped read against any model and list accounting journals; draft a quotation, confirm it into a sales order, and cancel one; draft a customer invoice, post it to the ledger, email it to the customer, register a reconciled payment, and raise a credit note; draft vendor bills and purchase orders and confirm them; validate a delivery; create CRM leads and move them between stages; create project tasks; attach files to any record; and post internal notes to a record's chatter. Auth is a single Odoo 14+ API key in one vault entry, so the module never sees a user password. Every ledger-touching command runs write_requires_approval, and the irreversible ones re-read the live record and refuse when an approved total no longer matches.",
+  "commands": [
+    {
+      "id": "odoo.find_partner",
+      "title": "Find an Odoo customer by email or name",
+      "provider": "odoo",
+      "risk": "low",
+      "mode": "read_only",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "email": {
+          "type": "string",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "found": "boolean",
+        "partner_id": "number",
+        "partners": "array",
+        "count": "number"
+      }
+    },
+    {
+      "id": "odoo.create_partner",
+      "title": "Create an Odoo customer record",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "email": {
+          "type": "string",
+          "required": false
+        },
+        "phone": {
+          "type": "string",
+          "required": false
+        },
+        "street": {
+          "type": "string",
+          "required": false
+        },
+        "city": {
+          "type": "string",
+          "required": false
+        },
+        "zip": {
+          "type": "string",
+          "required": false
+        },
+        "country_code": {
+          "type": "string",
+          "required": false
+        },
+        "vat": {
+          "type": "string",
+          "required": false
+        },
+        "is_company": {
+          "type": "boolean",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "partner_id": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_sale_order",
+      "title": "Draft an Odoo quotation with order lines",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "lines": {
+          "type": "array",
+          "required": true
+        },
+        "client_order_ref": {
+          "type": "string",
+          "required": false
+        },
+        "note": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "order_id": "number",
+        "order_name": "string",
+        "amount_total": "number",
+        "currency": "string",
+        "state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.confirm_sale_order",
+      "title": "Confirm an Odoo quotation into a sales order",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "order_id": {
+          "type": "number",
+          "required": true
+        },
+        "expected_amount_total": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "order_id": "number",
+        "order_name": "string",
+        "state": "string",
+        "amount_total": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_invoice",
+      "title": "Draft an Odoo customer invoice",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "lines": {
+          "type": "array",
+          "required": true
+        },
+        "invoice_date": {
+          "type": "string",
+          "required": false
+        },
+        "payment_reference": {
+          "type": "string",
+          "required": false
+        },
+        "narration": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_id": "number",
+        "invoice_name": "string",
+        "amount_total": "number",
+        "currency": "string",
+        "state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.post_invoice",
+      "title": "Post an Odoo customer invoice to the ledger",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "invoice_id": {
+          "type": "number",
+          "required": true
+        },
+        "expected_amount_total": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_id": "number",
+        "invoice_name": "string",
+        "state": "string",
+        "amount_total": "number",
+        "amount_residual": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.register_payment",
+      "title": "Register a reconciled payment against a posted invoice",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "invoice_id": {
+          "type": "number",
+          "required": true
+        },
+        "amount": {
+          "type": "number",
+          "required": false
+        },
+        "payment_date": {
+          "type": "string",
+          "required": false
+        },
+        "journal_id": {
+          "type": "number",
+          "required": false
+        },
+        "memo": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_id": "number",
+        "payment_ids": "array",
+        "amount_residual": "number",
+        "payment_state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.find_product",
+      "title": "Find a product by code or name",
+      "provider": "odoo",
+      "risk": "low",
+      "mode": "read_only",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "code": {
+          "type": "string",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "found": "boolean",
+        "product_id": "number",
+        "products": "array",
+        "count": "number"
+      }
+    },
+    {
+      "id": "odoo.search_read",
+      "title": "Run a scoped read against an Odoo model",
+      "provider": "odoo",
+      "risk": "low",
+      "mode": "read_only",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "model": {
+          "type": "string",
+          "required": true
+        },
+        "domain": {
+          "type": "array",
+          "required": false
+        },
+        "fields": {
+          "type": "array",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        },
+        "order": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "model": "string",
+        "records": "array",
+        "count": "number",
+        "truncated": "boolean"
+      }
+    },
+    {
+      "id": "odoo.cancel_sale_order",
+      "title": "Cancel an Odoo sales order",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "order_id": {
+          "type": "number",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "order_id": "number",
+        "order_name": "string",
+        "state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_credit_note",
+      "title": "Raise a credit note against a posted invoice",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "invoice_id": {
+          "type": "number",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": true
+        },
+        "journal_id": {
+          "type": "number",
+          "required": false
+        },
+        "reversal_date": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_id": "number",
+        "credit_note_id": "number",
+        "credit_note_name": "string",
+        "state": "string",
+        "amount_total": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_vendor_bill",
+      "title": "Draft an Odoo vendor bill",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "lines": {
+          "type": "array",
+          "required": true
+        },
+        "invoice_date": {
+          "type": "string",
+          "required": false
+        },
+        "vendor_reference": {
+          "type": "string",
+          "required": false
+        },
+        "narration": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "bill_id": "number",
+        "bill_name": "string",
+        "amount_total": "number",
+        "currency": "string",
+        "state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_purchase_order",
+      "title": "Draft an Odoo purchase order",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "lines": {
+          "type": "array",
+          "required": true
+        },
+        "partner_ref": {
+          "type": "string",
+          "required": false
+        },
+        "date_planned": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "purchase_order_id": "number",
+        "purchase_order_name": "string",
+        "amount_total": "number",
+        "currency": "string",
+        "state": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.confirm_purchase_order",
+      "title": "Confirm an Odoo purchase order",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "purchase_order_id": {
+          "type": "number",
+          "required": true
+        },
+        "expected_amount_total": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "purchase_order_id": "number",
+        "purchase_order_name": "string",
+        "state": "string",
+        "amount_total": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.validate_delivery",
+      "title": "Validate an Odoo delivery or receipt",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "picking_id": {
+          "type": "number",
+          "required": true
+        }
+      },
+      "output_schema": {
+        "picking_id": "number",
+        "picking_name": "string",
+        "state": "string",
+        "needs_wizard": "boolean",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.post_chatter_note",
+      "title": "Post an internal note to a record's chatter",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "model": {
+          "type": "string",
+          "required": true
+        },
+        "record_id": {
+          "type": "number",
+          "required": true
+        },
+        "body": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "output_schema": {
+        "model": "string",
+        "record_id": "number",
+        "message_id": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.update_partner",
+      "title": "Update an Odoo customer record",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        },
+        "email": {
+          "type": "string",
+          "required": false
+        },
+        "phone": {
+          "type": "string",
+          "required": false
+        },
+        "street": {
+          "type": "string",
+          "required": false
+        },
+        "city": {
+          "type": "string",
+          "required": false
+        },
+        "zip": {
+          "type": "string",
+          "required": false
+        },
+        "vat": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "partner_id": "number",
+        "updated_fields": "array",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.archive_partner",
+      "title": "Archive an Odoo customer record",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "partner_id": {
+          "type": "number",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "partner_id": "number",
+        "name": "string",
+        "active": "boolean",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_product",
+      "title": "Create an Odoo product",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "default_code": {
+          "type": "string",
+          "required": false
+        },
+        "list_price": {
+          "type": "number",
+          "required": false
+        },
+        "standard_price": {
+          "type": "number",
+          "required": false
+        },
+        "type": {
+          "type": "string",
+          "required": false
+        },
+        "description_sale": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "product_id": "number",
+        "name": "string",
+        "default_code": "string",
+        "list_price": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.update_product_price",
+      "title": "Update an Odoo product sales price",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "product_id": {
+          "type": "number",
+          "required": true
+        },
+        "list_price": {
+          "type": "number",
+          "required": true
+        },
+        "expected_current_price": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "product_id": "number",
+        "name": "string",
+        "old_price": "number",
+        "new_price": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_lead",
+      "title": "Create a CRM lead or opportunity",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "partner_id": {
+          "type": "number",
+          "required": false
+        },
+        "contact_name": {
+          "type": "string",
+          "required": false
+        },
+        "email_from": {
+          "type": "string",
+          "required": false
+        },
+        "phone": {
+          "type": "string",
+          "required": false
+        },
+        "expected_revenue": {
+          "type": "number",
+          "required": false
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "is_opportunity": {
+          "type": "boolean",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "lead_id": "number",
+        "name": "string",
+        "type": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.update_lead_stage",
+      "title": "Move a CRM lead to another stage",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "lead_id": {
+          "type": "number",
+          "required": true
+        },
+        "stage_name": {
+          "type": "string",
+          "required": false
+        },
+        "stage_id": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "lead_id": "number",
+        "stage_before": "string",
+        "stage_after": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.create_project_task",
+      "title": "Create a project task",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "project_id": {
+          "type": "number",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "partner_id": {
+          "type": "number",
+          "required": false
+        },
+        "date_deadline": {
+          "type": "string",
+          "required": false
+        },
+        "planned_hours": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "task_id": "number",
+        "name": "string",
+        "project": "string",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.list_journals",
+      "title": "List accounting journals",
+      "provider": "odoo",
+      "risk": "low",
+      "mode": "read_only",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "type": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "journals": "array",
+        "count": "number"
+      }
+    },
+    {
+      "id": "odoo.attach_file",
+      "title": "Attach a file to any Odoo record",
+      "provider": "odoo",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "model": {
+          "type": "string",
+          "required": true
+        },
+        "record_id": {
+          "type": "number",
+          "required": true
+        },
+        "filename": {
+          "type": "string",
+          "required": true
+        },
+        "content_base64": {
+          "type": "string",
+          "required": true
+        },
+        "mimetype": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "attachment_id": "number",
+        "filename": "string",
+        "bytes": "number",
+        "record_url": "string"
+      }
+    },
+    {
+      "id": "odoo.send_invoice_email",
+      "title": "Email a posted invoice to the customer",
+      "provider": "odoo",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "requires": [
+        "ODOO_API_KEY"
+      ],
+      "preview": true,
+      "receipt_required": true,
+      "irreversible": true,
+      "input_schema": {
+        "invoice_id": {
+          "type": "number",
+          "required": true
+        },
+        "template_id": {
+          "type": "number",
+          "required": false
+        },
+        "force_send": {
+          "type": "boolean",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_id": "number",
+        "invoice_name": "string",
+        "template_used": "string",
+        "mail_id": "number",
+        "recipient": "string",
+        "record_url": "string"
+      }
+    }
+  ],
+  "license_required": true,
+  "manifest_version": 2,
+  "publisher_pubkey": "83454016a786db1218de8f90efb3ec26e23162686f9624ac23079be09b0aa1e6"
+}
