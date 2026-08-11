@@ -1,0 +1,10 @@
+# Everything is LF, including on Windows checkouts.
+* text=auto eol=lf
+
+# ...except these two. The bundle in module/ carries a v2 tree signature that
+# covers a hash of every file in it, so ANY line-ending translation invalidates
+# it — a Windows clone with core.autocrlf=true would silently fail the
+# verification in TESTING.md §1. These two ship with CRLF; marking them binary
+# makes Git round-trip them byte for byte on every platform.
+module/module.json -text
+module/module.sig  -text
